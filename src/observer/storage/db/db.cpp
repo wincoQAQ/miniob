@@ -16,7 +16,9 @@ See the Mulan PSL v2 for more details. */
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <fstream>
 
+#include "common/lang/filesystem.h"
 #include "common/lang/string.h"
 #include "common/log/log.h"
 #include "common/os/path.h"
@@ -24,6 +26,7 @@ See the Mulan PSL v2 for more details. */
 #include "storage/common/meta_util.h"
 #include "storage/table/table.h"
 #include "storage/table/table_meta.h"
+#include "storage/field/field_meta.h"
 #include "storage/trx/trx.h"
 #include "storage/clog/disk_log_handler.h"
 #include "storage/clog/integrated_log_replayer.h"
@@ -173,6 +176,381 @@ RC Db::create_table(const char *table_name, span<const AttrInfoSqlNode> attribut
 
   opened_tables_[table_name] = table;
   LOG_INFO("Create table success. table name=%s, table_id:%d", table_name, table_id);
+  return RC::SUCCESS;
+}
+
+RC Db::drop_table(const char *table_name)
+{
+  if (common::is_blank(table_name)) {
+    LOG_WARN("Table name cannot be empty");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  auto iter = opened_tables_.find(table_name);
+  if (iter == opened_tables_.end()) {
+    LOG_WARN("Table does not exist: %s", table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  Table *table = iter->second;
+  TableMeta meta = table->table_meta();
+  opened_tables_.erase(iter);
+
+  delete table;
+
+  // Remove table files
+  filesystem::path file_path;
+  error_code ec;
+
+  file_path = table_meta_file(path_.c_str(), table_name);
+  filesystem::remove(file_path, ec);
+  if (ec) {
+    LOG_WARN("Failed to remove table meta file %s. rc=%s", file_path.c_str(), ec.message().c_str());
+  }
+
+  file_path = table_data_file(path_.c_str(), table_name);
+  filesystem::remove(file_path, ec);
+  if (ec) {
+    LOG_WARN("Failed to remove table data file %s. rc=%s", file_path.c_str(), ec.message().c_str());
+  }
+
+  file_path = table_lob_file(path_.c_str(), table_name);
+  if (filesystem::exists(file_path)) {
+    filesystem::remove(file_path, ec);
+    if (ec) {
+      LOG_WARN("Failed to remove table lob file %s. rc=%s", file_path.c_str(), ec.message().c_str());
+    }
+  }
+
+  for (int i = 0; i < meta.index_num(); i++) {
+    const IndexMeta *index_meta = meta.index(i);
+    if (index_meta == nullptr) {
+      continue;
+    }
+    file_path = table_index_file(path_.c_str(), table_name, index_meta->name());
+    filesystem::remove(file_path, ec);
+    if (ec) {
+      LOG_WARN("Failed to remove index file %s. rc=%s", file_path.c_str(), ec.message().c_str());
+    }
+  }
+
+  LOG_INFO("Drop table success. table name=%s", table_name);
+  return RC::SUCCESS;
+}
+
+RC Db::rename_table(const char *table_name, const char *new_table_name)
+{
+  if (common::is_blank(table_name) || common::is_blank(new_table_name)) {
+    LOG_WARN("Table name cannot be empty");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  auto iter = opened_tables_.find(table_name);
+  if (iter == opened_tables_.end()) {
+    LOG_WARN("Table does not exist: %s", table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  if (opened_tables_.find(new_table_name) != opened_tables_.end()) {
+    LOG_WARN("Table already exists: %s", new_table_name);
+    return RC::SCHEMA_TABLE_EXIST;
+  }
+
+  Table *table = iter->second;
+  
+  // Rename table meta file and data files
+  string old_meta_file = table_meta_file(path_.c_str(), table_name);
+  string new_meta_file = table_meta_file(path_.c_str(), new_table_name);
+  string old_data_file = table_data_file(path_.c_str(), table_name);
+  string new_data_file = table_data_file(path_.c_str(), new_table_name);
+  
+  // Rename files
+  if (::rename(old_meta_file.c_str(), new_meta_file.c_str()) < 0) {
+    LOG_WARN("Failed to rename table meta file: %s to %s", old_meta_file.c_str(), new_meta_file.c_str());
+    return RC::IOERR_WRITE;
+  }
+  
+  if (::rename(old_data_file.c_str(), new_data_file.c_str()) < 0) {
+    // Rollback meta file rename
+    ::rename(new_meta_file.c_str(), old_meta_file.c_str());
+    LOG_WARN("Failed to rename table data file: %s to %s", old_data_file.c_str(), new_data_file.c_str());
+    return RC::IOERR_WRITE;
+  }
+
+  // Rename LOB file if exists
+  string old_lob_file = table_lob_file(path_.c_str(), table_name);
+  string new_lob_file = table_lob_file(path_.c_str(), new_table_name);
+  if (std::filesystem::exists(old_lob_file)) {
+    if (::rename(old_lob_file.c_str(), new_lob_file.c_str()) < 0) {
+      LOG_WARN("Failed to rename LOB file, but continuing: %s to %s", old_lob_file.c_str(), new_lob_file.c_str());
+    }
+  }
+
+  // Update in-memory mapping
+  opened_tables_.erase(iter);
+  opened_tables_[new_table_name] = table;
+
+  LOG_INFO("Successfully renamed table %s to %s", table_name, new_table_name);
+  return RC::SUCCESS;
+}
+
+RC Db::add_column(const char *table_name, const char *column_name, 
+                  AttrType column_type, int column_length, bool nullable)
+{
+  if (common::is_blank(table_name) || common::is_blank(column_name)) {
+    LOG_WARN("Table or column name cannot be empty");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  Table *table = find_table(table_name);
+  if (nullptr == table) {
+    LOG_WARN("Table does not exist: %s", table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  // Check if column already exists
+  TableMeta &meta = const_cast<TableMeta &>(table->table_meta());
+  if (meta.field(column_name) != nullptr) {
+    LOG_WARN("Column already exists: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // Add the new column to the table meta
+  vector<FieldMeta> *fields = meta.mutable_field_metas();
+  int new_offset = meta.record_size();
+  
+  // Create new field meta
+  FieldMeta new_field(column_name, column_type, new_offset, column_length, true, fields->size());
+  fields->push_back(new_field);
+  
+  // Update record size
+  meta.set_record_size(new_offset + column_length);
+  
+  // Save updated meta to file
+  string meta_file = table_meta_file(path_.c_str(), table_name);
+  fstream fs;
+  fs.open(meta_file, ios_base::out | ios_base::binary | ios_base::trunc);
+  if (!fs.is_open()) {
+    // Rollback on save failure
+    fields->pop_back();
+    meta.set_record_size(new_offset);
+    LOG_ERROR("Failed to open table meta file for update: %s", meta_file.c_str());
+    return RC::IOERR_OPEN;
+  }
+  
+  meta.serialize(fs);
+  fs.close();
+  
+  LOG_INFO("Successfully added column %s to table %s", column_name, table_name);
+  return RC::SUCCESS;
+}
+
+RC Db::drop_column(const char *table_name, const char *column_name)
+{
+  if (common::is_blank(table_name) || common::is_blank(column_name)) {
+    LOG_WARN("Table or column name cannot be empty");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  Table *table = find_table(table_name);
+  if (nullptr == table) {
+    LOG_WARN("Table does not exist: %s", table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  // Check if column exists
+  TableMeta &meta = const_cast<TableMeta &>(table->table_meta());
+  const FieldMeta *field = meta.field(column_name);
+  if (field == nullptr) {
+    LOG_WARN("Column does not exist: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // Check if it's a system field (can't drop system fields)
+  if (field->offset() < meta.sys_field_num() * 4) {
+    LOG_WARN("Cannot drop system column: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // Find and remove the column from table meta
+  vector<FieldMeta> *fields = meta.mutable_field_metas();
+  int col_index = -1;
+  for (size_t i = 0; i < fields->size(); i++) {
+    if (strcmp((*fields)[i].name(), column_name) == 0) {
+      col_index = i;
+      break;
+    }
+  }
+  
+  if (col_index < 0) {
+    LOG_WARN("Column not found in fields: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+  
+  int dropped_len = (*fields)[col_index].len();
+  
+  // Remove the field from vector
+  fields->erase(fields->begin() + col_index);
+  
+  // Recalculate offsets for fields after the dropped one
+  for (size_t i = col_index; i < fields->size(); i++) {
+    FieldMeta &f = (*fields)[i];
+    // Cannot modify FieldMeta directly, so we need to recreate it
+    (*fields)[i] = FieldMeta(f.name(), f.type(), f.offset() - dropped_len, f.len(), f.visible(), f.field_id());
+  }
+  
+  // Update record size
+  int new_record_size = meta.record_size() - dropped_len;
+  meta.set_record_size(new_record_size);
+  
+  // Save updated meta to file
+  string meta_file = table_meta_file(path_.c_str(), table_name);
+  fstream fs;
+  fs.open(meta_file, ios_base::out | ios_base::binary | ios_base::trunc);
+  if (!fs.is_open()) {
+    LOG_ERROR("Failed to open table meta file for update: %s", meta_file.c_str());
+    return RC::IOERR_OPEN;
+  }
+  
+  meta.serialize(fs);
+  fs.close();
+  
+  LOG_INFO("Successfully dropped column %s from table %s", column_name, table_name);
+  return RC::SUCCESS;
+}
+
+RC Db::rename_column(const char *table_name, const char *column_name, 
+                     const char *new_column_name)
+{
+  if (common::is_blank(table_name) || common::is_blank(column_name) || common::is_blank(new_column_name)) {
+    LOG_WARN("Table or column name cannot be empty");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  Table *table = find_table(table_name);
+  if (nullptr == table) {
+    LOG_WARN("Table does not exist: %s", table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  TableMeta &meta = const_cast<TableMeta &>(table->table_meta());
+  
+  // Check if column to rename exists
+  const FieldMeta *field = meta.field(column_name);
+  if (field == nullptr) {
+    LOG_WARN("Column does not exist: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // Check if new column name already exists
+  if (meta.field(new_column_name) != nullptr) {
+    LOG_WARN("Column already exists: %s.%s", table_name, new_column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // Find and rename the column
+  vector<FieldMeta> *fields = meta.mutable_field_metas();
+  for (auto &f : *fields) {
+    if (strcmp(f.name(), column_name) == 0) {
+      // Recreate FieldMeta with new name
+      f = FieldMeta(new_column_name, f.type(), f.offset(), f.len(), f.visible(), f.field_id());
+      break;
+    }
+  }
+  
+  // Save updated meta to file
+  string meta_file = table_meta_file(path_.c_str(), table_name);
+  fstream fs;
+  fs.open(meta_file, ios_base::out | ios_base::binary | ios_base::trunc);
+  if (!fs.is_open()) {
+    LOG_ERROR("Failed to open table meta file for update: %s", meta_file.c_str());
+    return RC::IOERR_OPEN;
+  }
+  
+  meta.serialize(fs);
+  fs.close();
+  
+  LOG_INFO("Successfully renamed column %s to %s in table %s", column_name, new_column_name, table_name);
+  return RC::SUCCESS;
+}
+
+RC Db::modify_column(const char *table_name, const char *column_name, 
+                     AttrType column_type, int column_length, bool nullable)
+{
+  if (common::is_blank(table_name) || common::is_blank(column_name)) {
+    LOG_WARN("Table or column name cannot be empty");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  Table *table = find_table(table_name);
+  if (nullptr == table) {
+    LOG_WARN("Table does not exist: %s", table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  TableMeta &meta = const_cast<TableMeta &>(table->table_meta());
+  
+  // Check if column exists
+  const FieldMeta *field = meta.field(column_name);
+  if (field == nullptr) {
+    LOG_WARN("Column does not exist: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+
+  // Check if type change would require data conversion
+  // For now, we support same-size type changes and length increases
+  int old_len = field->len();
+  if (column_type == field->type() && column_length == old_len) {
+    LOG_WARN("Column type and length are the same: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+  
+  // Calculate size difference
+  int size_diff = column_length - old_len;
+  
+  // Find and modify the column
+  vector<FieldMeta> *fields = meta.mutable_field_metas();
+  int modified_offset = -1;
+  for (size_t i = 0; i < fields->size(); i++) {
+    if (strcmp((*fields)[i].name(), column_name) == 0) {
+      modified_offset = (*fields)[i].offset();
+      // Recreate FieldMeta with new type and length
+      (*fields)[i] = FieldMeta(column_name, column_type, modified_offset, column_length, (*fields)[i].visible(), (*fields)[i].field_id());
+      break;
+    }
+  }
+  
+  if (modified_offset < 0) {
+    LOG_WARN("Column not found: %s.%s", table_name, column_name);
+    return RC::INVALID_ARGUMENT;
+  }
+  
+  // Recalculate offsets for fields after the modified one
+  for (size_t i = 0; i < fields->size(); i++) {
+    if ((*fields)[i].offset() > modified_offset && (*fields)[i].offset() != modified_offset) {
+      FieldMeta &f = (*fields)[i];
+      (*fields)[i] = FieldMeta(f.name(), f.type(), f.offset() + size_diff, f.len(), f.visible(), f.field_id());
+    }
+  }
+  
+  // Update record size
+  int new_record_size = meta.record_size() + size_diff;
+  meta.set_record_size(new_record_size);
+  
+  // Save updated meta to file
+  string meta_file = table_meta_file(path_.c_str(), table_name);
+  fstream fs;
+  fs.open(meta_file, ios_base::out | ios_base::binary | ios_base::trunc);
+  if (!fs.is_open()) {
+    LOG_ERROR("Failed to open table meta file for update: %s", meta_file.c_str());
+    return RC::IOERR_OPEN;
+  }
+  
+  meta.serialize(fs);
+  fs.close();
+  
+  LOG_INFO("Successfully modified column %s in table %s, new type=%d, new length=%d", 
+           column_name, table_name, static_cast<int>(column_type), column_length);
   return RC::SUCCESS;
 }
 

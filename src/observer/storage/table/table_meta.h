@@ -65,6 +65,10 @@ public:
 
   int record_size() const;
 
+  // For ALTER TABLE operations
+  vector<FieldMeta> *mutable_field_metas() { return &fields_; }
+  void set_record_size(int size) { record_size_ = size; }
+
 public:
   int  serialize(ostream &os) const override;
   int  deserialize(istream &is) override;

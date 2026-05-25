@@ -173,6 +173,44 @@ struct DropTableSqlNode
 };
 
 /**
+ * @brief ALTER TABLE 的操作类型
+ * @ingroup SQLParser
+ */
+enum class AlterTableOperationType
+{
+  ADD_COLUMN,      ///< 添加列
+  DROP_COLUMN,     ///< 删除列
+  MODIFY_COLUMN,   ///< 修改列
+  RENAME_COLUMN,   ///< 重命名列
+  RENAME_TABLE,    ///< 重命名表
+};
+
+/**
+ * @brief 描述一个 ALTER TABLE 语句中的列操作
+ * @ingroup SQLParser
+ */
+struct AlterColumnDef
+{
+  AlterTableOperationType op_type;
+  string                  column_name;     ///< 列名（所有操作都需要）
+  string                  new_column_name; ///< 新列名（RENAME_COLUMN 时使用）
+  AttrType                column_type;     ///< 列类型（ADD/MODIFY 时使用）
+  int                     column_length;   ///< 列长度（ADD/MODIFY 时使用）
+  bool                    nullable;        ///< 是否可为 NULL（ADD/MODIFY 时使用，默认 true）
+};
+
+/**
+ * @brief 描述一个 ALTER TABLE 语句
+ * @ingroup SQLParser
+ */
+struct AlterTableSqlNode
+{
+  string                       relation_name;        ///< 表名
+  string                       new_relation_name;    ///< 新表名（RENAME_TABLE 时使用）
+  vector<AlterColumnDef>       column_defs;          ///< 列操作列表
+};
+
+/**
  * @brief 描述一个analyze table语句
  * @ingroup SQLParser
  */
@@ -278,6 +316,7 @@ enum SqlCommandFlag
   SCF_DELETE,
   SCF_CREATE_TABLE,
   SCF_DROP_TABLE,
+  SCF_ALTER_TABLE,
   SCF_ANALYZE_TABLE,
   SCF_CREATE_INDEX,
   SCF_DROP_INDEX,
@@ -310,6 +349,7 @@ public:
   UpdateSqlNode       update;
   CreateTableSqlNode  create_table;
   DropTableSqlNode    drop_table;
+  AlterTableSqlNode   alter_table;
   AnalyzeTableSqlNode analyze_table;
   CreateIndexSqlNode  create_index;
   DropIndexSqlNode    drop_index;

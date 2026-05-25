@@ -71,6 +71,57 @@ public:
       const StorageFormat storage_format = StorageFormat::ROW_FORMAT);
 
   /**
+   * @brief 删除一个表
+   * @param table_name 表名
+   */
+  RC drop_table(const char *table_name);
+
+  /**
+   * @brief 重命名一个表
+   * @param table_name 旧表名
+   * @param new_table_name 新表名
+   */
+  RC rename_table(const char *table_name, const char *new_table_name);
+
+  /**
+   * @brief 添加一列
+   * @param table_name 表名
+   * @param column_name 列名
+   * @param column_type 列类型
+   * @param column_length 列长度
+   * @param nullable 是否可以为NULL
+   */
+  RC add_column(const char *table_name, const char *column_name, 
+                AttrType column_type, int column_length, bool nullable);
+
+  /**
+   * @brief 删除一列
+   * @param table_name 表名
+   * @param column_name 列名
+   */
+  RC drop_column(const char *table_name, const char *column_name);
+
+  /**
+   * @brief 重命名一列
+   * @param table_name 表名
+   * @param column_name 原列名
+   * @param new_column_name 新列名
+   */
+  RC rename_column(const char *table_name, const char *column_name, 
+                   const char *new_column_name);
+
+  /**
+   * @brief 修改一列
+   * @param table_name 表名
+   * @param column_name 列名
+   * @param column_type 新列类型
+   * @param column_length 新列长度
+   * @param nullable 是否可以为NULL
+   */
+  RC modify_column(const char *table_name, const char *column_name, 
+                   AttrType column_type, int column_length, bool nullable);
+
+  /**
    * @brief 根据表名查找表
    */
   Table *find_table(const char *table_name) const;

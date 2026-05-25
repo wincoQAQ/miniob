@@ -117,6 +117,12 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
         LE
         GE
         NE
+        ALTER
+        ADD
+        RENAME
+        MODIFY
+        COLUMN
+        TO
 
 /** union 中定义各种数据类型，真实生成的代码也是union类型，所以不能有非POD类型的数据 **/
 %union {
@@ -187,6 +193,7 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
 %type <sql_node>            delete_stmt
 %type <sql_node>            create_table_stmt
 %type <sql_node>            drop_table_stmt
+%type <sql_node>            alter_table_stmt
 %type <sql_node>            analyze_table_stmt
 %type <sql_node>            show_tables_stmt
 %type <sql_node>            desc_table_stmt
@@ -225,6 +232,7 @@ command_wrapper:
   | delete_stmt
   | create_table_stmt
   | drop_table_stmt
+  | alter_table_stmt
   | analyze_table_stmt
   | show_tables_stmt
   | desc_table_stmt
@@ -281,6 +289,106 @@ drop_table_stmt:    /*drop table 语句的语法解析树*/
       $$ = new ParsedSqlNode(SCF_DROP_TABLE);
       $$->drop_table.relation_name = $3;
     };
+
+alter_table_stmt:   /* ALTER TABLE 语句的语法解析树 */
+    ALTER TABLE ID RENAME TO ID {
+      /* ALTER TABLE table_name RENAME TO new_name */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      $$->alter_table.new_relation_name = $6;
+    }
+    | ALTER TABLE ID ADD COLUMN ID INT_T {
+      /* ALTER TABLE table_name ADD COLUMN col_name INT */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::ADD_COLUMN;
+      col_def.column_name = $6;
+      col_def.column_type = AttrType::INTS;
+      col_def.column_length = 4;
+      col_def.nullable = true;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID ADD COLUMN ID STRING_T {
+      /* ALTER TABLE table_name ADD COLUMN col_name VARCHAR */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::ADD_COLUMN;
+      col_def.column_name = $6;
+      col_def.column_type = AttrType::CHARS;
+      col_def.column_length = 4;
+      col_def.nullable = true;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID ADD COLUMN ID FLOAT_T {
+      /* ALTER TABLE table_name ADD COLUMN col_name FLOAT */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::ADD_COLUMN;
+      col_def.column_name = $6;
+      col_def.column_type = AttrType::FLOATS;
+      col_def.column_length = 4;
+      col_def.nullable = true;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID DROP COLUMN ID {
+      /* ALTER TABLE table_name DROP COLUMN col_name */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::DROP_COLUMN;
+      col_def.column_name = $6;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID RENAME COLUMN ID TO ID {
+      /* ALTER TABLE table_name RENAME COLUMN old_col TO new_col */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::RENAME_COLUMN;
+      col_def.column_name = $6;
+      col_def.new_column_name = $8;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID MODIFY COLUMN ID INT_T {
+      /* ALTER TABLE table_name MODIFY COLUMN col_name INT */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::MODIFY_COLUMN;
+      col_def.column_name = $6;
+      col_def.column_type = AttrType::INTS;
+      col_def.column_length = 4;
+      col_def.nullable = true;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID MODIFY COLUMN ID STRING_T {
+      /* ALTER TABLE table_name MODIFY COLUMN col_name VARCHAR */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::MODIFY_COLUMN;
+      col_def.column_name = $6;
+      col_def.column_type = AttrType::CHARS;
+      col_def.column_length = 4;
+      col_def.nullable = true;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    | ALTER TABLE ID MODIFY COLUMN ID FLOAT_T {
+      /* ALTER TABLE table_name MODIFY COLUMN col_name FLOAT */
+      $$ = new ParsedSqlNode(SCF_ALTER_TABLE);
+      $$->alter_table.relation_name = $3;
+      AlterColumnDef col_def;
+      col_def.op_type = AlterTableOperationType::MODIFY_COLUMN;
+      col_def.column_name = $6;
+      col_def.column_type = AttrType::FLOATS;
+      col_def.column_length = 4;
+      col_def.nullable = true;
+      $$->alter_table.column_defs.push_back(col_def);
+    }
+    ;
 
 analyze_table_stmt:  /* analyze table 语法的语法解析树*/
     ANALYZE TABLE ID {
